@@ -3,8 +3,9 @@ package Params::Validate::Micro;
 use strict;
 use warnings;
 use Params::Validate qw(:all);
+use Hash::Merge qw(merge);
 use Scalar::Util qw(reftype);
-use Carp qw(croak);
+use Carp qw(croak confess);
 
 require Exporter;
 our @ISA = qw(Exporter);
@@ -19,11 +20,11 @@ Params::Validate::Micro - Validate parameters concisely
 
 =head1 VERSION
 
-Version 0.01
+Version 0.02
 
 =cut
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 =head1 SYNOPSIS
 
@@ -68,48 +69,68 @@ Examples:
 
 =back
 
+You may also have an empty argument string.  This indicates
+that you want no parameters at all.
+
 =head1 FUNCTIONS
 
 =head3 C<< micro_translate >>
 
-  my %spec = micro_translate($string);
+  my %spec = micro_translate($string, $extra);
 
 Turns C<< $string >> into a Params::Validate spec as
-described in L</FORMAT>.
+described in L</FORMAT>, then merges the resultant spec and
+the optional C<< $extra >> hashref using Hash::Merge.
 
 This returns a list, which just happens to be a set of key
 => value pairs.  This matters because it means that if you
 wanted to you could treat it as an array for long enough to
-figure out what order the parameters were specified in.
-
-In the future, this will probably lead to some kind of dual
-named / positional validation.
+figure out what order the parameters were specified in.  You
+could use this to do your own optional positional
+validation.
 
 =head3 C<< micro_validate >>
 
-  my $arg = micro_validate(\@_, $string, $extra);
+  my $arg = micro_validate(\%arg,  $string, $extra);
+  my $arg = micro_validate(\@args, $string, $extra);
 
-First, uses C<< micro_translate >> on C<< $string >>, then
-merges the resultant spec and the optional C<< $extra >>
-hashref, and passes the whole thing to Params::Validate.
+Use C<< micro_translate >> with C<< $string >> and C<<
+$extra >>, then passes the whole thing to Params::Validate.
+
+Named parameters should be passed in as a hashref, and
+positional parameters as an arrayref.  Positional parameters
+will be associated with names in the order specified in C<<
+$string >>.  For example:
+
+  micro_validate({ a => 1 }, q{$a; $b});
+  micro_validate([ 1 ], q{$a; $b});
+
+Both will return this:
+
+  { a => 1 }
+
+When passing positional parameters, C<< micro_validate >>
+will die if there are either too many for the spec or not
+enough to fill all non-optional parameters.
 
 Returns a hashref of the validated arguments.
 
 =cut
 
-my $BARE_VAR  = qr/[a-z_]\w+/i;
+my $BARE_VAR  = qr/[a-z_]\w*/i;
 
 my $SIGIL_VAR = qr/[%\$\@]?$BARE_VAR/i;
 
 my $EXTRACT_VARS = qr/\A 
                       (
+                        (?: \s* ; \s*)?
                         $SIGIL_VAR
                         (?: 
-                          (?: \s* ;)? 
+                          (?: \s* ; )? 
                           \s+ $SIGIL_VAR
                         )*
-                      )
-                      /x;
+                      )?
+                      \z/x;
 
 my %PVSPEC = (
   '%' => {
@@ -126,17 +147,25 @@ my %PVSPEC = (
 my ($SIGIL) = map { qr/$_/ } '[' . join("", keys %PVSPEC) . ']';
 
 sub micro_translate {
-  my ($string) = @_;
-  my @vspecs = map {
+  my ($string, $extra) = @_;
+  $string =~ s/^\s*//;
+  $string =~ s/\s*$//;
+  croak "'$string' does not appear to be a micro-spec"
+    unless $string =~ $EXTRACT_VARS;
+
+  # maybe they want to say "no args at all"
+  return unless defined $1;
+
+  my @vspecs = grep {
+    length($_)
+  } map {
     # make sure that semicolons are their own 'word'
     s/;/ ; /g;
     split /\s+/;
   } $string =~ $EXTRACT_VARS;
-  croak "'$string' does not appear to be a micro-spec"
-    unless @vspecs;
 
   my $optional;
-  my %spec;
+  my @spec;
   for my $vspec (@vspecs) {
     if ($vspec eq ';') {
       if ($optional++) {
@@ -156,30 +185,66 @@ sub micro_translate {
     if ($optional) {
       $spart->{optional} = 1;
     }
-    $spec{$vname} = $spart;
+    if ($extra->{$vname}) {
+      $spart = merge($spart, $extra->{$vname});
+    }
+    unless (%$spart) {
+      $spart = 1;
+    }
+    push @spec, $vname => $spart;
   }
 
-  return %spec;
+  return @spec;
+}
+
+sub _pos_to_named {
+  my ($string, $args, $spec) = @_;
+  my @tmpspec = @$spec;
+  my @tmpargs = @$args;
+  my $return = {};
+  while (my ($key, $val) = splice @tmpspec, 0, 2) {
+    unless (@tmpargs) {
+      if ($val->{optional}) {
+        last;
+      } else {
+        confess "not enough arguments for $string (only got @$args)";
+      }
+    }
+    $return->{$key} = shift(@tmpargs);
+  }
+  if (@tmpargs) {
+    confess "too many arguments for $string (leftover: @tmpargs)";
+  }
+  return $return;
 }
 
 sub micro_validate {
   my ($args, $string, $extra) = @_;
-  unless ($args and reftype($args) eq 'ARRAY') {
-    croak "first argument to micro_validate must be arrayref";
-  }
+  $args   ||= {};
   $string ||= "";
   $extra  ||= {};
-  my $spec = { micro_translate($string) };
+
+  my $spec = [ micro_translate($string, $extra) ];
+
+  if ($args and reftype($args) eq 'ARRAY') {
+    $args = _pos_to_named($string, $args, $spec);
+  }
+  unless ($args and reftype($args) eq 'HASH') {
+    croak "first argument to micro_validate must be hashref or arrayref";
+  }
+
   return {
     validate_with(
       params => $args,
-      spec   => {
-        %$spec,
-        %$extra,
-      },
+      spec   => { @$spec },
     )
   };
 }
+
+=head1 SEE ALSO
+
+L<Params::Validate>
+L<Hash::Merge>
 
 =head1 AUTHOR
 

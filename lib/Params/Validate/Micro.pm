@@ -3,7 +3,6 @@ package Params::Validate::Micro;
 use strict;
 use warnings;
 use Params::Validate qw(:all);
-use Hash::Merge qw(merge);
 use Scalar::Util qw(reftype);
 use Carp qw(croak confess);
 
@@ -20,11 +19,11 @@ Params::Validate::Micro - Validate parameters concisely
 
 =head1 VERSION
 
-Version 0.02
+Version 0.030
 
 =cut
 
-our $VERSION = '0.02';
+our $VERSION = '0.030';
 
 =head1 SYNOPSIS
 
@@ -80,7 +79,7 @@ that you want no parameters at all.
 
 Turns C<< $string >> into a Params::Validate spec as
 described in L</FORMAT>, then merges the resultant spec and
-the optional C<< $extra >> hashref using Hash::Merge.
+the optional C<< $extra >> hashref.
 
 This returns a list, which just happens to be a set of key
 => value pairs.  This matters because it means that if you
@@ -186,7 +185,12 @@ sub micro_translate {
       $spart->{optional} = 1;
     }
     if ($extra->{$vname}) {
-      $spart = merge($spart, $extra->{$vname});
+      # as of now, the only things that may be already set in $spart are 'type'
+      # and 'optional'.  it is therefore safe to naively join the hashes, since
+      # we don't need to worry about more complex cases like merging nested
+      # 'callbacks' entries.  re-evaluate this if more complex specs are
+      # being generated automatically.  -- hdp, 2007-04-10
+      %$spart = (%$spart, %{$extra->{$vname}});
     }
     unless (%$spart) {
       $spart = 1;
@@ -244,7 +248,6 @@ sub micro_validate {
 =head1 SEE ALSO
 
 L<Params::Validate>
-L<Hash::Merge>
 
 =head1 AUTHOR
 
